@@ -1,0 +1,85 @@
+// raysync — the encrypted transport: length-prefixed ChaCha20-Poly1305 frames.
+//
+// Key = HKDF(salt, password, "raysync-v1"); the salt travels in clear at
+// accept time (takeit's scheme — the password never does). Nonces are a
+// direction byte + a counter, so each side has its own nonce space and a
+// replayed or reordered frame fails authentication.
+import std/net;
+import std/crypto;
+
+pub struct Link {
+    handle: int,
+    key: bytes,
+    send_dir: int,
+    send_ctr: int,
+    recv_dir: int,
+    recv_ctr: int,
+    buf: bytes,
+}
+
+pub fn derive_key(password: string, salt: bytes) -> bytes {
+    match (crypto.hkdf_sha256(salt, password.to_bytes(), "raysync-v1".to_bytes(), 32)) {
+        Option.Some(k) => k,
+        Option.None => b"",
+    }
+}
+
+// dir: 1 = client→server, 2 = server→client.
+pub fn link(handle: int, key: bytes, is_client: bool) -> Link {
+    Link { handle: handle, key: key, send_dir: if (is_client) { 1 } else { 2 }, send_ctr: 0, recv_dir: if (is_client) { 2 } else { 1 }, recv_ctr: 0, buf: b"" }
+}
+
+fn nonce_of(dir: int, ctr: int) -> bytes {
+    var n: [int] = [dir, 0, 0, 0];
+    var v = ctr;
+    var i = 0;
+    while (i < 8) {
+        n.push(v % 256);
+        v = v / 256;
+        i = i + 1;
+    }
+    bytes_of(n)
+}
+
+fn be32(n: int) -> bytes {
+    bytes_of([n / 16777216 % 256, n / 65536 % 256, n / 256 % 256, n % 256])
+}
+
+pub fn send_frame(l: Link, plain: bytes) -> Result<int, string> {
+    let nonce = nonce_of(l.send_dir, l.send_ctr);
+    l.send_ctr = l.send_ctr + 1;
+    match (crypto.chacha20poly1305_seal(l.key, nonce, b"", plain)) {
+        Option.None => Result.Err("seal failed"),
+        Option.Some(sealed) => {
+            net.socket_write_bytes(l.handle, be32(sealed.len()) + sealed)
+        },
+    }
+}
+
+fn read_exact(l: Link, n: int) -> Result<bytes, string> {
+    while (l.buf.len() < n) {
+        let chunk = net.socket_read_bytes(l.handle)?;
+        if (chunk.len() == 0) {
+            return Result.Err("connection closed");
+        }
+        l.buf = l.buf + chunk;
+    }
+    let out = l.buf.sub_bytes(0, n);
+    l.buf = l.buf.sub_bytes(n, l.buf.len());
+    Result.Ok(out)
+}
+
+pub fn recv_frame(l: Link) -> Result<bytes, string> {
+    let head = read_exact(l, 4)?;
+    let n = head[0] * 16777216 + head[1] * 65536 + head[2] * 256 + head[3];
+    if (n < 16 || n > 1048576) {
+        return Result.Err("bad frame length");
+    }
+    let sealed = read_exact(l, n)?;
+    let nonce = nonce_of(l.recv_dir, l.recv_ctr);
+    l.recv_ctr = l.recv_ctr + 1;
+    match (crypto.chacha20poly1305_open(l.key, nonce, b"", sealed)) {
+        Option.Some(plain) => Result.Ok(plain),
+        Option.None => Result.Err("authentication failed (wrong password or tampering)"),
+    }
+}

@@ -1,0 +1,79 @@
+// Recursive walk and hashing over a real temp tree.
+import std/fs;
+import scan;
+
+const ROOT: string = "/tmp/raysync_scan_test";
+
+fn reset() {
+    if (fs.exists(ROOT)) {
+        for f in scan.walk(ROOT) {
+            fs.remove_file(ROOT + "/" + f.path);
+        }
+    } else {
+        fs.mkdir(ROOT);
+    }
+    if (!fs.exists(ROOT + "/sub")) {
+        fs.mkdir(ROOT + "/sub");
+    }
+}
+
+@test
+fn walks_nested_dirs_with_relative_paths() {
+    reset();
+    fs.write_file(ROOT + "/a.txt", "aaa");
+    fs.write_file(ROOT + "/sub/b.txt", "bbb");
+    let files = scan.walk(ROOT);
+    assert_eq(files.len(), 2);
+    var paths: [string] = [];
+    for f in files {
+        paths.push(f.path);
+    }
+    assert(paths.contains("a.txt"));
+    assert(paths.contains("sub/b.txt"));
+}
+
+@test
+fn file_hash_is_stable_and_content_sensitive() {
+    reset();
+    fs.write_file(ROOT + "/x", "contenido");
+    let h1 = match (scan.file_hash(ROOT + "/x")) {
+        Result.Ok(h) => h,
+        Result.Err(e) => panic(e),
+    };
+    let h2 = match (scan.file_hash(ROOT + "/x")) {
+        Result.Ok(h) => h,
+        Result.Err(e) => panic(e),
+    };
+    assert_eq(h1, h2);
+    assert_eq(h1.len(), 64);
+    fs.write_file(ROOT + "/x", "contenidO");
+    match (scan.file_hash(ROOT + "/x")) {
+        Result.Ok(h3) => assert(h3 != h1),
+        Result.Err(e) => panic(e),
+    }
+}
+
+@test
+fn block_hashes_and_read_block_at_agree() {
+    reset();
+    // 2.5 blocks: 64 KiB of 'a', 64 KiB of 'b', 32 KiB of 'c'.
+    var content = "a".repeat(65536) + "b".repeat(65536) + "c".repeat(32768);
+    fs.write_file(ROOT + "/big", content);
+    let hs = match (scan.block_hashes(ROOT + "/big")) {
+        Result.Ok(h) => h,
+        Result.Err(e) => panic(e),
+    };
+    assert_eq(hs.len(), 3);
+    assert(hs[0] != hs[1]);
+    match (scan.read_block_at(ROOT + "/big", 1)) {
+        Result.Ok(b) => {
+            assert_eq(b.len(), 65536);
+            assert_eq(b[0], 98);
+        },
+        Result.Err(e) => panic(e),
+    }
+    match (scan.read_block_at(ROOT + "/big", 2)) {
+        Result.Ok(b) => assert_eq(b.len(), 32768),
+        Result.Err(e) => panic(e),
+    }
+}

@@ -1,0 +1,103 @@
+// End-to-end over localhost: full transfer, block delta (only changed blocks
+// travel as data), nested dirs, delete, wrong password. One @test (zombie
+// listeners between tests).
+import std/fs;
+import std/time;
+import scan;
+import server;
+import push;
+
+const SRC: string = "/tmp/raysync_e2e_src";
+
+const DST: string = "/tmp/raysync_e2e_dst";
+
+const PORT: int = 18991;
+
+fn wipe(root: string) {
+    if (fs.exists(root)) {
+        for f in scan.walk(root) {
+            fs.remove_file(root + "/" + f.path);
+        }
+    } else {
+        fs.mkdir(root);
+    }
+}
+
+fn must_read(path: string) -> string {
+    match (fs.read_file(path)) {
+        Result.Ok(s) => s,
+        Result.Err(e) => panic(e),
+    }
+}
+
+fn do_push(delete: bool) -> push.PushStats {
+    match (push.push_once(
+    push.PushOpts { src: SRC, host: "127.0.0.1", port: PORT, password: "secreto", delete: delete }
+)) {
+        Result.Ok(st) => st,
+        Result.Err(e) => panic(e),
+    }
+}
+
+@test
+fn sync_end_to_end() {
+    wipe(SRC);
+    wipe(DST);
+    if (!fs.exists(SRC + "/docs")) {
+        fs.mkdir(SRC + "/docs");
+    }
+    fs.write_file(SRC + "/hola.txt", "hola mundo");
+    fs.write_file(SRC + "/docs/nota.md", "# nota\ncontenido\n");
+    var big = "a".repeat(65536) + "b".repeat(65536) + "c".repeat(65536);
+    fs.write_file(SRC + "/big.bin", big);
+
+    match (server.start(
+        server.ServeOpts { root: DST, bind: "127.0.0.1", port: PORT, password: "secreto" }
+    )) {
+        Result.Ok(p) => { },
+        Result.Err(e) => panic(e),
+    }
+    time.sleep(150);
+
+    // First push: everything travels as data.
+    let st1 = do_push(false);
+    assert_eq(st1.files_sent, 3);
+    assert(st1.data_bytes >= 65536 * 3);
+    assert_eq(must_read(DST + "/hola.txt"), "hola mundo");
+    assert_eq(must_read(DST + "/docs/nota.md"), "# nota\ncontenido\n");
+    assert_eq(must_read(DST + "/big.bin").len(), 65536 * 3);
+
+    // Nothing changed: nothing travels.
+    let st2 = do_push(false);
+    assert_eq(st2.files_sent, 0);
+    assert_eq(st2.data_bytes, 0);
+
+    // Change ONE block of the big file: only ~64 KiB travels, the rest is
+    // reused in place on the receiver.
+    var patched = "a".repeat(65536) + "X".repeat(65536) + "c".repeat(65536);
+    fs.write_file(SRC + "/big.bin", patched);
+    let st3 = do_push(false);
+    assert_eq(st3.files_sent, 1);
+    assert(st3.data_bytes >= 65536);
+    assert(st3.data_bytes < 65536 * 2);
+    assert(st3.copied_bytes >= 65536 * 2);
+    let got = must_read(DST + "/big.bin");
+    assert_eq(got.len(), 65536 * 3);
+    assert_eq(got.substring(65536, 65537), "X");
+    assert_eq(got.substring(0, 1), "a");
+    assert_eq(got.substring(131072, 131073), "c");
+
+    // --delete removes receiver files gone from the source.
+    fs.remove_file(SRC + "/hola.txt");
+    do_push(true);
+    assert(!fs.exists(DST + "/hola.txt"));
+    assert(fs.exists(DST + "/docs/nota.md"));
+
+    // Wrong password: authentication fails, nothing breaks.
+    match (push.push_once(
+    push.PushOpts { src: SRC, host: "127.0.0.1", port: PORT, password: "equivocada", delete: false }
+)) {
+        Result.Err(e) => assert(e.contains("authentication") || e.contains("closed")),
+        Result.Ok(st) => panic("wrong password must fail"),
+    }
+}

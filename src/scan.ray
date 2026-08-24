@@ -1,0 +1,163 @@
+// raysync — recursive directory scan and hashing.
+//
+// Whole-file hashes are CHAINED sha256 over 64 KiB chunks (h = sha256(h ‖
+// chunk)), the takeit pattern: std/crypto has no incremental hasher (recorded
+// finding), and one-shot sha256 of a big file would need it whole in memory.
+// Block hashes are plain sha256 per block (blocks fit in memory by design).
+import std/fs;
+import std/crypto;
+import std/hex;
+
+pub const BLOCK: int = 65536;
+
+pub struct FileInfo {
+    path: string,
+    size: int,
+    mtime: int,
+}
+
+fn walk_into(root: string, rel: string, out: [FileInfo]) {
+    let dir = if (rel == "") { root } else { root + "/" + rel };
+    match (fs.list_dir(dir)) {
+        Result.Err(e) => { },
+        Result.Ok(names) => {
+            for name in names {
+                let rpath = if (rel == "") { name } else { rel + "/" + name };
+                let full = root + "/" + rpath;
+                if (fs.is_dir(full)) {
+                    walk_into(root, rpath, out);
+                } else if (fs.is_file(full)) {
+                    let size = match (fs.file_size(full)) {
+                        Result.Ok(n) => n,
+                        Result.Err(e) => 0,
+                    };
+                    let mtime = match (fs.mtime(full)) {
+                        Result.Ok(n) => n,
+                        Result.Err(e) => 0,
+                    };
+                    out.push(FileInfo { path: rpath, size: size, mtime: mtime });
+                }
+            }
+        },
+    }
+}
+
+// All regular files under root, as sorted relative paths.
+pub fn walk(root: string) -> [FileInfo] {
+    var out: [FileInfo] = [];
+    walk_into(root, "", out);
+    out
+}
+
+fn to_hex_str(b: bytes) -> string {
+    hex.hex_encode(b)
+}
+
+// Chained whole-file hash (streaming, 64 KiB at a time).
+pub fn file_hash(path: string) -> Result<string, string> {
+    let h = fs.open(path, "r")?;
+    var acc = crypto.sha256(b"raysync-v1");
+    var more = true;
+    while (more) {
+        match (fs.read_bytes(h, BLOCK)) {
+            Result.Err(e) => {
+                close(h);
+                return Result.Err(e);
+            },
+            Result.Ok(chunk_opt) => {
+                match (chunk_opt) {
+                    Option.Some(chunk) => {
+                        acc = crypto.sha256(acc + chunk);
+                    },
+                    Option.None => {
+                        more = false;
+                    },
+                }
+            },
+        }
+    }
+    close(h);
+    Result.Ok(to_hex_str(acc))
+}
+
+// Per-block hashes of a file (one sha256 per 64 KiB block).
+pub fn block_hashes(path: string) -> Result<[string], string> {
+    let h = fs.open(path, "r")?;
+    var out: [string] = [];
+    var more = true;
+    while (more) {
+        match (read_exact_block(h)) {
+            Result.Err(e) => {
+                close(h);
+                return Result.Err(e);
+            },
+            Result.Ok(block_opt) => {
+                match (block_opt) {
+                    Option.Some(block) => {
+                        out.push(to_hex_str(crypto.sha256(block)));
+                        if (block.len() < BLOCK) {
+                            more = false;
+                        }
+                    },
+                    Option.None => {
+                        more = false;
+                    },
+                }
+            },
+        }
+    }
+    close(h);
+    Result.Ok(out)
+}
+
+// fs.read_bytes may return SHORT reads anywhere; blocks must be exact (both
+// sides hash the same 64 KiB windows), so accumulate until full or EOF.
+pub fn read_exact_block(h: int) -> Result<Option<bytes>, string> {
+    var buf = b"";
+    while (buf.len() < BLOCK) {
+        match (fs.read_bytes(h, BLOCK - buf.len())) {
+            Result.Err(e) => {
+                return Result.Err(e);
+            },
+            Result.Ok(chunk_opt) => {
+                match (chunk_opt) {
+                    Option.Some(chunk) => {
+                        buf = buf + chunk;
+                    },
+                    Option.None => {
+                        if (buf.len() == 0) {
+                            return Result.Ok(Option.None);
+                        }
+                        return Result.Ok(Option.Some(buf));
+                    },
+                }
+            },
+        }
+    }
+    Result.Ok(Option.Some(buf))
+}
+
+// Reads block index `idx` of a file (for reconstruction COPY ops).
+pub fn read_block_at(path: string, idx: int) -> Result<bytes, string> {
+    let h = fs.open(path, "r")?;
+    match (fs.seek(h, idx * BLOCK)) {
+        Result.Err(e) => {
+            close(h);
+            return Result.Err(e);
+        },
+        Result.Ok(pos) => { },
+    }
+    match (read_exact_block(h)) {
+        Result.Err(e) => {
+            close(h);
+            Result.Err(e)
+        },
+        Result.Ok(block_opt) => {
+            close(h);
+            match (block_opt) {
+                Option.Some(b) => Result.Ok(b),
+                Option.None => Result.Err("block out of range"),
+            }
+        },
+    }
+}

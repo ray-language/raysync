@@ -1,0 +1,310 @@
+// raysync — protocol messages (JSON control frames + raw data frames) and the
+// pure block-delta planning.
+//
+// Delta is FIXED-BLOCK, position-aligned (64 KiB): block i of the sender is
+// compared with block i of the receiver — cheap and effective for appends and
+// in-place edits; an insertion shifts everything after it (rolling-checksum
+// rsync is out of v1 scope).
+import std/json;
+from std/json import Json;
+import scan;
+
+// Frame type bytes.
+pub const T_MSG: int = 77;
+
+pub const T_DATA: int = 68;
+
+pub fn msg_frame(j: Json) -> bytes {
+    bytes_of([T_MSG]) + json.stringify(j).to_bytes()
+}
+
+pub fn data_frame(b: bytes) -> bytes {
+    bytes_of([T_DATA]) + b
+}
+
+pub enum Frame {
+    Msg(Json),
+    Data(bytes),
+    Broken(string),
+}
+
+pub fn classify(plain: bytes) -> Frame {
+    if (plain.len() == 0) {
+        return Frame.Broken("empty frame");
+    }
+    if (plain[0] == T_DATA) {
+        return Frame.Data(plain.sub_bytes(1, plain.len()));
+    }
+    if (plain[0] != T_MSG) {
+        return Frame.Broken("unknown frame type");
+    }
+    match (from_utf8(plain.sub_bytes(1, plain.len()))) {
+        Result.Err(e) => Frame.Broken("bad utf8"),
+        Result.Ok(s) => {
+            match (json.parse(s)) {
+                Result.Ok(j) => Frame.Msg(j),
+                Result.Err(e) => Frame.Broken("bad json: " + e),
+            }
+        },
+    }
+}
+
+pub fn tag_of(j: Json) -> string {
+    match (json.get_string(j, "t")) {
+        Option.Some(s) => s,
+        Option.None => "",
+    }
+}
+
+// --- builders ---------------------------------------------------------------
+
+pub fn hello() -> Json {
+    var m: Map<string, Json> = Map.new();
+    m.insert("t", Json.JStr("hello"));
+    m.insert("v", Json.JNum(1.0));
+    Json.JObject(m)
+}
+
+pub struct ManifestEntry {
+    path: string,
+    size: int,
+    hash: string,
+}
+
+pub fn manifest(files: [ManifestEntry], delete: bool) -> Json {
+    var arr: [Json] = [];
+    for f in files {
+        var e: Map<string, Json> = Map.new();
+        e.insert("p", Json.JStr(f.path));
+        e.insert("size", Json.JNum(f.size as float));
+        e.insert("h", Json.JStr(f.hash));
+        arr.push(Json.JObject(e));
+    }
+    var m: Map<string, Json> = Map.new();
+    m.insert("t", Json.JStr("manifest"));
+    m.insert("delete", Json.JBool(delete));
+    m.insert("files", Json.JArray(arr));
+    Json.JObject(m)
+}
+
+pub fn parse_manifest(j: Json) -> ([ManifestEntry], bool) {
+    var out: [ManifestEntry] = [];
+    let del = match (json.get_bool(j, "delete")) {
+        Option.Some(b) => b,
+        Option.None => false,
+    };
+    match (json.get_array(j, "files")) {
+        Option.Some(items) => {
+            for it in items {
+                let p = match (json.get_string(it, "p")) {
+                    Option.Some(s) => s,
+                    Option.None => "",
+                };
+                let size = match (json.get_int(it, "size")) {
+                    Option.Some(n) => n,
+                    Option.None => 0,
+                };
+                let h = match (json.get_string(it, "h")) {
+                    Option.Some(s) => s,
+                    Option.None => "",
+                };
+                if (p != "") {
+                    out.push(ManifestEntry { path: p, size: size, hash: h });
+                }
+            }
+        },
+        Option.None => { },
+    }
+    return (out, del);
+}
+
+pub struct BlockPlanEntry {
+    path: string,
+    hashes: [string],
+}
+
+pub fn plan_msg(full: [string], blocks: [BlockPlanEntry], deleted: [string]) -> Json {
+    var fa: [Json] = [];
+    for p in full {
+        fa.push(Json.JStr(p));
+    }
+    var ba: [Json] = [];
+    for b in blocks {
+        var e: Map<string, Json> = Map.new();
+        e.insert("p", Json.JStr(b.path));
+        var hs: [Json] = [];
+        for h in b.hashes {
+            hs.push(Json.JStr(h));
+        }
+        e.insert("hashes", Json.JArray(hs));
+        ba.push(Json.JObject(e));
+    }
+    var da: [Json] = [];
+    for p in deleted {
+        da.push(Json.JStr(p));
+    }
+    var m: Map<string, Json> = Map.new();
+    m.insert("t", Json.JStr("plan"));
+    m.insert("full", Json.JArray(fa));
+    m.insert("blocks", Json.JArray(ba));
+    m.insert("deleted", Json.JArray(da));
+    Json.JObject(m)
+}
+
+pub fn str_list(j: Json, key: string) -> [string] {
+    var out: [string] = [];
+    match (json.get_array(j, key)) {
+        Option.Some(items) => {
+            for it in items {
+                match (json.as_string(it)) {
+                    Option.Some(s) => {
+                        out.push(s);
+                    },
+                    Option.None => { },
+                }
+            }
+        },
+        Option.None => { },
+    }
+    out
+}
+
+pub fn parse_block_plans(j: Json) -> [BlockPlanEntry] {
+    var out: [BlockPlanEntry] = [];
+    match (json.get_array(j, "blocks")) {
+        Option.Some(items) => {
+            for it in items {
+                let p = match (json.get_string(it, "p")) {
+                    Option.Some(s) => s,
+                    Option.None => "",
+                };
+                var hs: [string] = [];
+                match (json.get_array(it, "hashes")) {
+                    Option.Some(harr) => {
+                        for h in harr {
+                            match (json.as_string(h)) {
+                                Option.Some(s) => {
+                                    hs.push(s);
+                                },
+                                Option.None => { },
+                            }
+                        }
+                    },
+                    Option.None => { },
+                }
+                if (p != "") {
+                    out.push(BlockPlanEntry { path: p, hashes: hs });
+                }
+            }
+        },
+        Option.None => { },
+    }
+    out
+}
+
+pub fn file_msg(path: string, size: int) -> Json {
+    var m: Map<string, Json> = Map.new();
+    m.insert("t", Json.JStr("file"));
+    m.insert("p", Json.JStr(path));
+    m.insert("size", Json.JNum(size as float));
+    Json.JObject(m)
+}
+
+// Patch ops: {"c": idx} copy the receiver's block idx · {"d": len} take the
+// next data frame (len bytes).
+pub enum Op {
+    Copy(int),
+    Data(int),
+}
+
+pub fn patch_msg(path: string, size: int, ops: [Op]) -> Json {
+    var oa: [Json] = [];
+    for op in ops {
+        var e: Map<string, Json> = Map.new();
+        match (op) {
+            Op.Copy(idx) => {
+                e.insert("c", Json.JNum(idx as float));
+            },
+            Op.Data(len) => {
+                e.insert("d", Json.JNum(len as float));
+            },
+        }
+        oa.push(Json.JObject(e));
+    }
+    var m: Map<string, Json> = Map.new();
+    m.insert("t", Json.JStr("patch"));
+    m.insert("p", Json.JStr(path));
+    m.insert("size", Json.JNum(size as float));
+    m.insert("ops", Json.JArray(oa));
+    Json.JObject(m)
+}
+
+pub fn parse_ops(j: Json) -> [Op] {
+    var out: [Op] = [];
+    match (json.get_array(j, "ops")) {
+        Option.Some(items) => {
+            for it in items {
+                match (json.get_int(it, "c")) {
+                    Option.Some(idx) => {
+                        out.push(Op.Copy(idx));
+                    },
+                    Option.None => {
+                        match (json.get_int(it, "d")) {
+                            Option.Some(len) => {
+                                out.push(Op.Data(len));
+                            },
+                            Option.None => { },
+                        }
+                    },
+                }
+            }
+        },
+        Option.None => { },
+    }
+    out
+}
+
+pub fn end_msg(hash: string) -> Json {
+    var m: Map<string, Json> = Map.new();
+    m.insert("t", Json.JStr("end"));
+    m.insert("h", Json.JStr(hash));
+    Json.JObject(m)
+}
+
+pub fn simple_msg(tag: string) -> Json {
+    var m: Map<string, Json> = Map.new();
+    m.insert("t", Json.JStr(tag));
+    Json.JObject(m)
+}
+
+pub fn err_msg(text: string) -> Json {
+    var m: Map<string, Json> = Map.new();
+    m.insert("t", Json.JStr("err"));
+    m.insert("msg", Json.JStr(text));
+    Json.JObject(m)
+}
+
+pub fn ok_msg(files: int, data_bytes: int, copied_bytes: int) -> Json {
+    var m: Map<string, Json> = Map.new();
+    m.insert("t", Json.JStr("ok"));
+    m.insert("files", Json.JNum(files as float));
+    m.insert("data_bytes", Json.JNum(data_bytes as float));
+    m.insert("copied_bytes", Json.JNum(copied_bytes as float));
+    Json.JObject(m)
+}
+
+// Client-side delta: compare local block hashes with the receiver's, position
+// by position.
+pub fn build_ops(local_hashes: [string], local_sizes: [int], remote_hashes: [string]) -> [Op] {
+    var out: [Op] = [];
+    var i = 0;
+    while (i < local_hashes.len()) {
+        if (i < remote_hashes.len() && local_hashes[i] == remote_hashes[i]) {
+            out.push(Op.Copy(i));
+        } else {
+            out.push(Op.Data(local_sizes[i]));
+        }
+        i = i + 1;
+    }
+    out
+}

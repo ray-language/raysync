@@ -1,0 +1,247 @@
+// raysync — the receiving side: accept, derive the key from salt + password,
+// answer the manifest with a plan, and reconstruct incoming files (full or
+// patched) into temp files renamed into place.
+import std/net;
+import std/fs;
+import std/crypto;
+import std/json;
+from std/json import Json;
+import scan;
+import frames;
+import proto;
+
+pub struct ServeOpts {
+    root: string,
+    bind: string,
+    port: int,
+    password: string,
+}
+
+pub fn start(opts: ServeOpts) -> Result<int, string> {
+    if (!fs.exists(opts.root)) {
+        fs.mkdir(opts.root)?;
+    }
+    let listener = net.tcp_listen(opts.bind, opts.port)?;
+    let actual = net.local_port(listener);
+    spawn(fn() {
+        var running = true;
+        while (running) {
+            match (net.tcp_accept(listener)) {
+                Result.Err(e) => {
+                    running = false;
+                },
+                Result.Ok(h) => {
+                    spawn(fn() {
+                        serve_conn(h, opts);
+                    });
+                },
+            }
+        }
+    });
+    Result.Ok(actual)
+}
+
+fn mkdir_p(root: string, rel_dir: string) {
+    if (rel_dir == "") {
+        return;
+    }
+    var acc = root;
+    for part in rel_dir.split("/") {
+        if (part != "") {
+            acc = acc + "/" + part;
+            if (!fs.exists(acc)) {
+                fs.mkdir(acc);
+            }
+        }
+    }
+}
+
+fn parent_of(rel: string) -> string {
+    var last = 0 - 1;
+    var i = 0;
+    for c in rel.chars() {
+        if (c == '/') {
+            last = i;
+        }
+        i = i + 1;
+    }
+    if (last < 0) { "" } else { rel.substring(0, last) }
+}
+
+fn serve_conn(h: int, opts: ServeOpts) {
+    net.set_read_timeout(h, 120000);
+    let salt = crypto.random_bytes(16);
+    match (net.socket_write_bytes(h, salt)) {
+        Result.Err(e) => {
+            close(h);
+            return;
+        },
+        Result.Ok(n) => { },
+    }
+    let key = frames.derive_key(opts.password, salt);
+    let l = frames.link(h, key, false);
+    match (session(l, opts)) {
+        Result.Err(e) => {
+            frames.send_frame(l, proto.msg_frame(proto.err_msg(e)));
+            eprint("raysync: session error: " + e);
+        },
+        Result.Ok(n) => { },
+    }
+    close(h);
+}
+
+fn expect_msg(l: frames.Link) -> Result<Json, string> {
+    match (proto.classify(frames.recv_frame(l)?)) {
+        proto.Frame.Msg(j) => Result.Ok(j),
+        proto.Frame.Data(b) => Result.Err("unexpected data frame"),
+        proto.Frame.Broken(e) => Result.Err(e),
+    }
+}
+
+fn expect_data(l: frames.Link) -> Result<bytes, string> {
+    match (proto.classify(frames.recv_frame(l)?)) {
+        proto.Frame.Data(b) => Result.Ok(b),
+        proto.Frame.Msg(j) => Result.Err("unexpected control frame"),
+        proto.Frame.Broken(e) => Result.Err(e),
+    }
+}
+
+fn session(l: frames.Link, opts: ServeOpts) -> Result<int, string> {
+    let hello = expect_msg(l)?;
+    if (proto.tag_of(hello) != "hello") {
+        return Result.Err("expected hello");
+    }
+    let mano = expect_msg(l)?;
+    if (proto.tag_of(mano) != "manifest") {
+        return Result.Err("expected manifest");
+    }
+    let (files, delete) = proto.parse_manifest(mano);
+    // Local view: path → hash for existing files.
+    var have: Map<string, string> = Map.new();
+    for f in scan.walk(opts.root) {
+        match (scan.file_hash(opts.root + "/" + f.path)) {
+            Result.Ok(hh) => {
+                have.insert(f.path, hh);
+            },
+            Result.Err(e) => { },
+        }
+    }
+    var full: [string] = [];
+    var blocks: [proto.BlockPlanEntry] = [];
+    var wanted: Map<string, bool> = Map.new();
+    for f in files {
+        wanted.insert(f.path, true);
+        match (get(have, f.path)) {
+            Option.None => {
+                full.push(f.path);
+            },
+            Option.Some(hh) => {
+                if (hh != f.hash) {
+                    match (scan.block_hashes(opts.root + "/" + f.path)) {
+                        Result.Ok(hs) => {
+                            blocks.push(proto.BlockPlanEntry { path: f.path, hashes: hs });
+                        },
+                        Result.Err(e) => {
+                            full.push(f.path);
+                        },
+                    }
+                }
+            },
+        }
+    }
+    var deleted: [string] = [];
+    if (delete) {
+        for p in have.keys() {
+            if (!wanted.contains_key(p)) {
+                fs.remove_file(opts.root + "/" + p);
+                deleted.push(p);
+            }
+        }
+    }
+    frames.send_frame(l, proto.msg_frame(proto.plan_msg(full, blocks, deleted)))?;
+    // Receive files until "done".
+    var nfiles = 0;
+    var data_bytes = 0;
+    var copied_bytes = 0;
+    var running = true;
+    while (running) {
+        let m = expect_msg(l)?;
+        let tag = proto.tag_of(m);
+        if (tag == "done") {
+            running = false;
+        } else if (tag == "file" || tag == "patch") {
+            let p = match (json.get_string(m, "p")) {
+                Option.Some(s) => s,
+                Option.None => {
+                    return Result.Err("missing path");
+                },
+            };
+            if (p.contains("..")) {
+                return Result.Err("path traversal rejected: " + p);
+            }
+            mkdir_p(opts.root, parent_of(p));
+            let final_path = opts.root + "/" + p;
+            let tmp = final_path + ".raysync.tmp";
+            fs.write_file_bytes(tmp, b"")?;
+            var acc = crypto.sha256(b"raysync-v1");
+            if (tag == "file") {
+                let size = match (json.get_int(m, "size")) {
+                    Option.Some(n) => n,
+                    Option.None => 0,
+                };
+                var got = 0;
+                while (got < size) {
+                    let chunk = expect_data(l)?;
+                    fs.append_file_bytes(tmp, chunk)?;
+                    acc = crypto.sha256(acc + chunk);
+                    got = got + chunk.len();
+                    data_bytes = data_bytes + chunk.len();
+                }
+            } else {
+                for op in proto.parse_ops(m) {
+                    match (op) {
+                        proto.Op.Copy(idx) => {
+                            let block = scan.read_block_at(final_path, idx)?;
+                            fs.append_file_bytes(tmp, block)?;
+                            acc = crypto.sha256(acc + block);
+                            copied_bytes = copied_bytes + block.len();
+                        },
+                        proto.Op.Data(len) => {
+                            let chunk = expect_data(l)?;
+                            fs.append_file_bytes(tmp, chunk)?;
+                            acc = crypto.sha256(acc + chunk);
+                            data_bytes = data_bytes + chunk.len();
+                        },
+                    }
+                }
+            }
+            let fin = expect_msg(l)?;
+            if (proto.tag_of(fin) != "end") {
+                return Result.Err("expected end");
+            }
+            let want_hash = match (json.get_string(fin, "h")) {
+                Option.Some(s) => s,
+                Option.None => "",
+            };
+            // Verify the TEMP file, then rename: a bad transfer never
+            // replaces a good file.
+            match (scan.file_hash(tmp)) {
+                Result.Ok(got_hash) => {
+                    if (got_hash != want_hash) {
+                        fs.remove_file(tmp);
+                        return Result.Err("hash mismatch for " + p);
+                    }
+                },
+                Result.Err(e) => {
+                    return Result.Err(e);
+                },
+            }
+            fs.rename(tmp, final_path)?;
+            nfiles = nfiles + 1;
+        } else {
+            return Result.Err("unexpected message: " + tag);
+        }
+    }
+    frames.send_frame(l, proto.msg_frame(proto.ok_msg(nfiles, data_bytes, copied_bytes)))?;
+    Result.Ok(0)
+}

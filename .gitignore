@@ -1,0 +1,3 @@
+# dependencies downloaded by the package manager
+.ray-deps/
+raysync

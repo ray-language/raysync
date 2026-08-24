@@ -1,0 +1,227 @@
+// raysync — the sending side: scan, manifest, receive the plan, stream full
+// files and block patches, and (with --watch) repeat on any mtime change.
+import std/net;
+import std/fs;
+import std/crypto;
+import std/time;
+import std/json;
+from std/hex import hex_encode;
+from std/json import Json;
+import scan;
+import frames;
+import proto;
+
+pub struct PushOpts {
+    src: string,
+    host: string,
+    port: int,
+    password: string,
+    delete: bool,
+}
+
+pub struct PushStats {
+    files_sent: int,
+    data_bytes: int,
+    copied_bytes: int,
+}
+
+fn read_salt(h: int) -> Result<bytes, string> {
+    var buf = b"";
+    while (buf.len() < 16) {
+        let chunk = net.socket_read_bytes(h)?;
+        if (chunk.len() == 0) {
+            return Result.Err("connection closed during handshake");
+        }
+        buf = buf + chunk;
+    }
+    Result.Ok(buf.sub_bytes(0, 16))
+}
+
+fn expect_msg(l: frames.Link) -> Result<Json, string> {
+    match (proto.classify(frames.recv_frame(l)?)) {
+        proto.Frame.Msg(j) => {
+            if (proto.tag_of(j) == "err") {
+                match (json.get_string(j, "msg")) {
+                    Option.Some(m) => {
+                        return Result.Err("server: " + m);
+                    },
+                    Option.None => {
+                        return Result.Err("server error");
+                    },
+                }
+            }
+            Result.Ok(j)
+        },
+        proto.Frame.Data(b) => Result.Err("unexpected data frame"),
+        proto.Frame.Broken(e) => Result.Err(e),
+    }
+}
+
+// Streams a whole file as data frames; returns (bytes_sent, chained_hash).
+fn send_full(l: frames.Link, path: string) -> Result<(int, string), string> {
+    let h = fs.open(path, "r")?;
+    var acc = crypto.sha256(b"raysync-v1");
+    var sent = 0;
+    var more = true;
+    while (more) {
+        match (scan.read_exact_block(h)) {
+            Result.Err(e) => {
+                close(h);
+                return Result.Err(e);
+            },
+            Result.Ok(block_opt) => {
+                match (block_opt) {
+                    Option.Some(block) => {
+                        frames.send_frame(l, proto.data_frame(block))?;
+                        acc = crypto.sha256(acc + block);
+                        sent = sent + block.len();
+                        if (block.len() < scan.BLOCK) {
+                            more = false;
+                        }
+                    },
+                    Option.None => {
+                        more = false;
+                    },
+                }
+            },
+        }
+    }
+    close(h);
+    Result.Ok((sent, hex_encode(acc)))
+}
+
+pub fn push_once(opts: PushOpts) -> Result<PushStats, string> {
+    let files = scan.walk(opts.src);
+    var entries: [proto.ManifestEntry] = [];
+    for f in files {
+        let hh = scan.file_hash(opts.src + "/" + f.path)?;
+        entries.push(proto.ManifestEntry { path: f.path, size: f.size, hash: hh });
+    }
+    let h = net.tcp_connect(opts.host, opts.port)?;
+    net.set_read_timeout(h, 120000);
+    let salt = read_salt(h)?;
+    let l = frames.link(h, frames.derive_key(opts.password, salt), true);
+    frames.send_frame(l, proto.msg_frame(proto.hello()))?;
+    frames.send_frame(l, proto.msg_frame(proto.manifest(entries, opts.delete)))?;
+    let plan = expect_msg(l)?;
+    if (proto.tag_of(plan) != "plan") {
+        close(h);
+        return Result.Err("expected plan");
+    }
+    var sent_files = 0;
+    var data_bytes = 0;
+    var copied_bytes = 0;
+    for p in proto.str_list(plan, "full") {
+        let full_path = opts.src + "/" + p;
+        let size = match (fs.file_size(full_path)) {
+            Result.Ok(n) => n,
+            Result.Err(e) => 0,
+        };
+        frames.send_frame(l, proto.msg_frame(proto.file_msg(p, size)))?;
+        let (sent, hash) = send_full(l, full_path)?;
+        frames.send_frame(l, proto.msg_frame(proto.end_msg(hash)))?;
+        data_bytes = data_bytes + sent;
+        sent_files = sent_files + 1;
+    }
+    for bp in proto.parse_block_plans(plan) {
+        let full_path = opts.src + "/" + bp.path;
+        // Local blocks: hashes + sizes, then the aligned diff.
+        var lh: [string] = [];
+        var ls: [int] = [];
+        var blocks: [bytes] = [];
+        let fh = fs.open(full_path, "r")?;
+        var more = true;
+        while (more) {
+            match (scan.read_exact_block(fh)) {
+                Result.Err(e) => {
+                    close(fh);
+                    return Result.Err(e);
+                },
+                Result.Ok(block_opt) => {
+                    match (block_opt) {
+                        Option.Some(block) => {
+                            blocks.push(block);
+                            lh.push(hex_encode(crypto.sha256(block)));
+                            ls.push(block.len());
+                            if (block.len() < scan.BLOCK) {
+                                more = false;
+                            }
+                        },
+                        Option.None => {
+                            more = false;
+                        },
+                    }
+                },
+            }
+        }
+        close(fh);
+        let ops = proto.build_ops(lh, ls, bp.hashes);
+        let size = match (fs.file_size(full_path)) {
+            Result.Ok(n) => n,
+            Result.Err(e) => 0,
+        };
+        frames.send_frame(l, proto.msg_frame(proto.patch_msg(bp.path, size, ops)))?;
+        var acc = crypto.sha256(b"raysync-v1");
+        var bi = 0;
+        for op in ops {
+            match (op) {
+                proto.Op.Copy(idx) => {
+                    acc = crypto.sha256(acc + blocks[bi]);
+                    copied_bytes = copied_bytes + blocks[bi].len();
+                },
+                proto.Op.Data(len) => {
+                    frames.send_frame(l, proto.data_frame(blocks[bi]))?;
+                    acc = crypto.sha256(acc + blocks[bi]);
+                    data_bytes = data_bytes + len;
+                },
+            }
+            bi = bi + 1;
+        }
+        frames.send_frame(l, proto.msg_frame(proto.end_msg(hex_encode(acc))))?;
+        sent_files = sent_files + 1;
+    }
+    frames.send_frame(l, proto.msg_frame(proto.simple_msg("done")))?;
+    let done = expect_msg(l)?;
+    close(h);
+    if (proto.tag_of(done) != "ok") {
+        return Result.Err("expected ok");
+    }
+    Result.Ok(
+        PushStats { files_sent: sent_files, data_bytes: data_bytes, copied_bytes: copied_bytes }
+    )
+}
+
+// Fingerprint of the tree: paths + sizes + mtimes (cheap; no hashing).
+fn fingerprint(root: string) -> string {
+    var acc = "";
+    for f in scan.walk(root) {
+        acc = acc + f.path + ":" + to_string(f.size) + ":" + to_string(f.mtime) + ";";
+    }
+    acc
+}
+
+// Watch mode: poll mtimes every interval_ms and push when anything moved.
+// std/fs has no watch API (recorded finding — the 4th app to poll mtimes).
+pub fn watch(opts: PushOpts, interval_ms: int) -> int {
+    var last = "";
+    while (true) {
+        let now = fingerprint(opts.src);
+        if (now != last) {
+            match (push_once(
+            opts
+        )) {
+                Result.Ok(st) => {
+                    last = now;
+                    eprint(
+                        "synced: " + to_string(st.files_sent) + " file(s), " + to_string(st.data_bytes) + " B data, " + to_string(st.copied_bytes) + " B reused"
+                    );
+                },
+                Result.Err(e) => {
+                    eprint("raysync: " + e + " (retrying)");
+                },
+            }
+        }
+        time.sleep(interval_ms);
+    }
+    0
+}

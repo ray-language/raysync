@@ -1,0 +1,135 @@
+// raysync — one-way encrypted directory sync with fixed-block deltas.
+import std/crypto;
+import std/hex;
+import server;
+import push;
+
+const DEFAULT_PORT: int = 7460;
+
+fn usage() {
+    eprint("usage:");
+    eprint("  raysync serve DIR [--bind H] [--port N] [--password P]");
+    eprint("  raysync push SRC --host H [--port N] --password P [--delete] [--watch [MS]]");
+    eprint("");
+    eprint("  serve: receives into DIR (prints a generated password if none given)");
+    eprint(
+        "  push:  sends SRC; unchanged files skip, changed files send only changed 64 KiB blocks"
+    );
+    eprint("  --delete: remove receiver files that no longer exist in SRC");
+    eprint("  --watch:  keep watching mtimes and re-push on change (default 2000 ms)");
+}
+
+fn flag_value(av: [string], name: string) -> Option<string> {
+    var i = 0;
+    while (i + 1 < av.len()) {
+        if (av[i] == name) {
+            return Option.Some(av[i + 1]);
+        }
+        i = i + 1;
+    }
+    Option.None
+}
+
+fn flag_int(av: [string], name: string, fallback: int) -> int {
+    match (flag_value(av, name)) {
+        Option.Some(s) => {
+            match (parse_int(s)) {
+                Option.Some(n) => n,
+                Option.None => fallback,
+            }
+        },
+        Option.None => fallback,
+    }
+}
+
+fn flag_str(av: [string], name: string, fallback: string) -> string {
+    match (flag_value(av, name)) {
+        Option.Some(s) => s,
+        Option.None => fallback,
+    }
+}
+
+fn has_flag(av: [string], name: string) -> bool {
+    for a in av {
+        if (a == name) {
+            return true;
+        }
+    }
+    false
+}
+
+fn gen_password() -> string {
+    hex.hex_encode(crypto.random_bytes(8))
+}
+
+fn main() -> int {
+    let av = args();
+    if (av.len() < 2 || has_flag(av, "--help") || has_flag(av, "-h")) {
+        usage();
+        return if (av.len() < 2) { 1 } else { 0 };
+    }
+    let cmd = av[0];
+    if (cmd == "serve") {
+        var password = flag_str(av, "--password", "");
+        if (password == "") {
+            password = gen_password();
+            eprint("password: " + password);
+        }
+        let opts = server.ServeOpts {
+            root: av[1],
+            bind: flag_str(av, "--bind", "0.0.0.0"),
+            port: flag_int(av, "--port", DEFAULT_PORT),
+            password: password
+        };
+        match (server.start(opts)) {
+            Result.Err(e) => {
+                eprint("raysync: " + e);
+                1
+            },
+            Result.Ok(port) => {
+                eprint("raysync receiving into '" + av[1] + "' on port " + to_string(port));
+                match (recv(signals())) {
+                    Option.Some(sig) => 0,
+                    Option.None => 0,
+                }
+            },
+        }
+    } else if (cmd == "push") {
+        let opts = push.PushOpts {
+            src: av[1],
+            host: flag_str(av, "--host", "127.0.0.1"),
+            port: flag_int(av, "--port", DEFAULT_PORT),
+            password: flag_str(av, "--password", ""),
+            delete: has_flag(av, "--delete")
+        };
+        if (opts.password == "") {
+            eprint("raysync: --password is required");
+            return 1;
+        }
+        if (has_flag(
+    av,
+    "--watch"
+)) {
+            push.watch(opts, flag_int(av, "--watch", 2000))
+        } else {
+            match (push.push_once(
+    opts
+)) {
+                Result.Ok(st) => {
+                    print(
+                        "synced " + to_string(st.files_sent) + " file(s): " + to_string(st.data_bytes) + " B sent, " + to_string(st.copied_bytes) + " B reused in place"
+                    );
+                    0
+                },
+                Result.Err(e) => {
+                    eprint("raysync: " + e);
+                    1
+                },
+            }
+        }
+    } else {
+        eprint("raysync: unknown command: " + cmd);
+        usage();
+        1
+    }
+}
