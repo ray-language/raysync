@@ -1,6 +1,6 @@
 # raysync
 
-Sincronizador de directorios **con delta por bloques y transporte cifrado**, escrito en [raylang](https://github.com/roberto-ayala/raylang): un `push` de una dirección que salta los archivos idénticos (hash), reenvía solo los **bloques de 64 KiB que cambiaron** de los archivos modificados, reconstruye del lado receptor con verificación de hash y rename atómico, y con `--watch` queda vigilando mtimes. Complementa a [takeit](../takeit) (un archivo, una vez) con el caso "un árbol entero, continuamente".
+Sincronizador de directorios **con delta por bloques y transporte cifrado**, escrito en [raylang](https://github.com/roberto-ayala/raylang): un `push` de una dirección que salta los archivos idénticos (hash), reenvía solo los **bloques de 64 KiB que cambiaron** de los archivos modificados, reconstruye del lado receptor con verificación de hash y rename atómico, y con `--watch` queda aparcado en eventos de kernel (`fs.watch`). Complementa a [takeit](../takeit) (un archivo, una vez) con el caso "un árbol entero, continuamente".
 
 ```text
 # Receptor
@@ -16,13 +16,13 @@ synced 0 file(s): 0 B sent, 0 B reused in place
 # … tocas 1 byte de un archivo de 30 MB …
 synced 1 file(s): 65536 B sent, 31391744 B reused in place
 
-$ raysync push ./proyecto … --watch          # modo continuo (sondea mtimes)
+$ raysync push ./proyecto … --watch          # modo continuo (eventos de kernel)
 $ raysync push ./proyecto … --delete         # borra en destino lo que ya no existe
 ```
 
 ## Medido (nativo, localhost)
 
-- **50 MB fríos: 0.17 s** (cifrado ChaCha20-Poly1305 + sha256 encadenado en
+- **50 MB fríos: 0.17 s** (cifrado ChaCha20-Poly1305 + sha256 incremental en
   ambos lados incluidos).
 - Push sin cambios: 53 ms (escaneo + manifest + plan).
 - 1 byte cambiado en 30 MB: **solo 64 KiB viajan**; resultado byte-idéntico
@@ -34,7 +34,7 @@ $ raysync push ./proyecto … --delete         # borra en destino lo que ya no e
    `hkdf_sha256(salt, password, "raysync-v1")`. Todo lo demás son frames
    `[len BE32][ChaCha20-Poly1305]` con nonce = dirección + contador (un frame
    reordenado o repetido falla la autenticación; la contraseña nunca viaja).
-2. El emisor manda su manifiesto (ruta, tamaño, hash encadenado por chunks).
+2. El emisor manda su manifiesto (ruta, tamaño, sha256 real del archivo — incremental, contrastable con `shasum -a 256`).
 3. El receptor responde el plan: `full` (no lo tengo), nada (idéntico), o
    `blocks` (lo tengo distinto: aquí van los hashes de MIS bloques de 64 KiB).
 4. Para cada archivo con delta, el emisor compara bloque a bloque (alineado
@@ -54,7 +54,7 @@ fuera de v1).
 | Push cifrado E2E (clave por contraseña, nonces direccionales) | ✅ |
 | Skip por hash + delta por bloques 64 KiB + reconstrucción verificada | ✅ |
 | Árboles anidados (mkdir -p en destino), rutas relativas | ✅ |
-| `--delete` (espejo) y `--watch` (sondeo de mtimes) | ✅ |
+| `--delete` (espejo) y `--watch` (fs.watch + debounce; degrada a sondeo) | ✅ |
 | Contraseña errónea = fallo de autenticación limpio | ✅ |
 | Binario nativo (50 MB en 0.17 s) | ✅ |
 | Tests (scan/hash/bloques + E2E con delta y borrado) | ✅ 4 |
@@ -65,16 +65,17 @@ fuera de v1).
 
 Anotados en `raylang/IDEAS.md` §69:
 
-1. **Sin watch de filesystem** — cuarta app sondeando mtimes (tras `ray dev`,
-   raycode-dev y raylogs `--follow`). La evidencia ya es plantilla.
+1. **[RESUELTO — raylang M115.4]** Sin watch de filesystem: `fs.watch`
+   existe y `--watch` aparca en eventos de kernel con debounce.
 2. **Sin metadatos**: `fs` no expone permisos ni distingue symlinks
    (`is_dir`/`is_file` y nada más) → un sync fiel a rsync no puede serlo.
 3. **Sin `fs.write_bytes(handle)`** (§68): la reconstrucción escribe por
    `append_file_bytes` a un temp + rename — funciona y es atómico, pero
    reescribir un bloque in-place es inexpresable.
-4. **Sin hasher incremental** en `std/crypto`: el hash de archivo es sha256
-   encadenado por chunks (patrón takeit, tercera app que lo copia) — un
-   `sha256_init/update/final` evitaría la variante casera.
+4. **[RESUELTO — raylang M126]** Sin hasher incremental: `sha256_init` +
+   `hash_update` + `hash_final` existen — el hash de archivo es el sha256
+   REAL (boundary-independiente, contrastable con `shasum`), y el encadenado
+   casero desapareció del protocolo entero.
 5. **Positivo**: la cripto de `ring` vuela (50 MB cifrados+hasheados en
    0.17 s), `seek`+`read_bytes` componen la lectura de bloques limpia, y
    `fs.rename` vuelve a ser la pieza de atomicidad que todo lo salva.
