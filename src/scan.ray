@@ -56,7 +56,10 @@ fn to_hex_str(b: bytes) -> string {
 // Chained whole-file hash (streaming, 64 KiB at a time).
 pub fn file_hash(path: string) -> Result<string, string> {
     let h = fs.open(path, "r")?;
-    var acc = crypto.sha256(b"raysync-v1");
+    // Hasher incremental (raylang M126): el sha256 REAL del archivo, por trozos — independiente
+    // de los limites de bloque (el encadenado casero dependia de ellos) y contrastable con
+    // `shasum -a 256`.
+    let hh = crypto.sha256_init()?;
     var more = true;
     while (more) {
         match (fs.read_bytes(h, BLOCK)) {
@@ -67,7 +70,7 @@ pub fn file_hash(path: string) -> Result<string, string> {
             Result.Ok(chunk_opt) => {
                 match (chunk_opt) {
                     Option.Some(chunk) => {
-                        acc = crypto.sha256(acc + chunk);
+                        let _ = crypto.hash_update(hh, chunk);
                     },
                     Option.None => {
                         more = false;
@@ -77,7 +80,7 @@ pub fn file_hash(path: string) -> Result<string, string> {
         }
     }
     close(h);
-    Result.Ok(to_hex_str(acc))
+    Result.Ok(to_hex_str(crypto.hash_final(hh)?))
 }
 
 // Per-block hashes of a file (one sha256 per 64 KiB block).

@@ -57,10 +57,11 @@ fn expect_msg(l: frames.Link) -> Result<Json, string> {
     }
 }
 
-// Streams a whole file as data frames; returns (bytes_sent, chained_hash).
+// Streams a whole file as data frames; returns (bytes_sent, sha256_hex).
 fn send_full(l: frames.Link, path: string) -> Result<(int, string), string> {
     let h = fs.open(path, "r")?;
-    var acc = crypto.sha256(b"raysync-v1");
+    // Hasher incremental (raylang M126): el sha256 real del archivo, boundary-independiente.
+    let hh = crypto.sha256_init()?;
     var sent = 0;
     var more = true;
     while (more) {
@@ -73,7 +74,7 @@ fn send_full(l: frames.Link, path: string) -> Result<(int, string), string> {
                 match (block_opt) {
                     Option.Some(block) => {
                         frames.send_frame(l, proto.data_frame(block))?;
-                        acc = crypto.sha256(acc + block);
+                        let _ = crypto.hash_update(hh, block);
                         sent = sent + block.len();
                         if (block.len() < scan.BLOCK) {
                             more = false;
@@ -87,7 +88,7 @@ fn send_full(l: frames.Link, path: string) -> Result<(int, string), string> {
         }
     }
     close(h);
-    Result.Ok((sent, hex_encode(acc)))
+    Result.Ok((sent, hex_encode(crypto.hash_final(hh)?)))
 }
 
 pub fn push_once(opts: PushOpts) -> Result<PushStats, string> {
@@ -161,23 +162,23 @@ pub fn push_once(opts: PushOpts) -> Result<PushStats, string> {
             Result.Err(e) => 0,
         };
         frames.send_frame(l, proto.msg_frame(proto.patch_msg(bp.path, size, ops)))?;
-        var acc = crypto.sha256(b"raysync-v1");
+        let hh = crypto.sha256_init()?;
         var bi = 0;
         for op in ops {
             match (op) {
                 proto.Op.Copy(idx) => {
-                    acc = crypto.sha256(acc + blocks[bi]);
+                    let _ = crypto.hash_update(hh, blocks[bi]);
                     copied_bytes = copied_bytes + blocks[bi].len();
                 },
                 proto.Op.Data(len) => {
                     frames.send_frame(l, proto.data_frame(blocks[bi]))?;
-                    acc = crypto.sha256(acc + blocks[bi]);
+                    let _ = crypto.hash_update(hh, blocks[bi]);
                     data_bytes = data_bytes + len;
                 },
             }
             bi = bi + 1;
         }
-        frames.send_frame(l, proto.msg_frame(proto.end_msg(hex_encode(acc))))?;
+        frames.send_frame(l, proto.msg_frame(proto.end_msg(hex_encode(crypto.hash_final(hh)?))))?;
         sent_files = sent_files + 1;
     }
     frames.send_frame(l, proto.msg_frame(proto.simple_msg("done")))?;
@@ -202,7 +203,42 @@ fn fingerprint(root: string) -> string {
 
 // Watch mode: poll mtimes every interval_ms and push when anything moved.
 // std/fs has no watch API (recorded finding — the 4th app to poll mtimes).
+// Modo continuo: eventos de KERNEL (fs.watch, raylang M115.4) con debounce — una rafaga de
+// guardados es UN push. Degrada al sondeo de mtimes viejo si el watch no se puede armar.
 pub fn watch(opts: PushOpts, interval_ms: int) -> int {
+    match (fs.watch(opts.src)) {
+        Result.Ok(w) => {
+            sync_and_report(opts);
+            while (true) {
+                match (fs.next_event(w)) {
+                    Result.Ok(_ev) => {
+                        // Debounce: agrupa la rafaga.
+                        var draining = true;
+                        while (draining) {
+                            match (fs.next_event_timeout(w, 200)) {
+                                Result.Ok(more) => match (more) {
+                                    Option.Some(_e2) => { },
+                                    Option.None => {
+                                        draining = false;
+                                    },
+                                },
+                                Result.Err(_e3) => {
+                                    draining = false;
+                                },
+                            }
+                        }
+                        sync_and_report(opts);
+                    },
+                    Result.Err(_e) => {
+                        time.sleep(interval_ms);
+                    },
+                }
+            }
+            return 0;
+        },
+        Result.Err(_e) => { },
+    }
+    // Respaldo: el sondeo de mtimes de siempre.
     var last = "";
     while (true) {
         let now = fingerprint(opts.src);
@@ -224,4 +260,15 @@ pub fn watch(opts: PushOpts, interval_ms: int) -> int {
         time.sleep(interval_ms);
     }
     0
+}
+
+fn sync_and_report(opts: PushOpts) {
+    match (push_once(
+    opts
+)) {
+        Result.Ok(st) => eprint(
+            "synced: " + to_string(st.files_sent) + " file(s), " + to_string(st.data_bytes) + " B data, " + to_string(st.copied_bytes) + " B reused"
+        ),
+        Result.Err(e) => eprint("raysync: " + e + " (retrying)"),
+    }
 }

@@ -183,7 +183,6 @@ fn session(l: frames.Link, opts: ServeOpts) -> Result<int, string> {
             let final_path = opts.root + "/" + p;
             let tmp = final_path + ".raysync.tmp";
             fs.write_file_bytes(tmp, b"")?;
-            var acc = crypto.sha256(b"raysync-v1");
             if (tag == "file") {
                 let size = match (json.get_int(m, "size")) {
                     Option.Some(n) => n,
@@ -193,7 +192,6 @@ fn session(l: frames.Link, opts: ServeOpts) -> Result<int, string> {
                 while (got < size) {
                     let chunk = expect_data(l)?;
                     fs.append_file_bytes(tmp, chunk)?;
-                    acc = crypto.sha256(acc + chunk);
                     got = got + chunk.len();
                     data_bytes = data_bytes + chunk.len();
                 }
@@ -203,13 +201,11 @@ fn session(l: frames.Link, opts: ServeOpts) -> Result<int, string> {
                         proto.Op.Copy(idx) => {
                             let block = scan.read_block_at(final_path, idx)?;
                             fs.append_file_bytes(tmp, block)?;
-                            acc = crypto.sha256(acc + block);
                             copied_bytes = copied_bytes + block.len();
                         },
                         proto.Op.Data(len) => {
                             let chunk = expect_data(l)?;
                             fs.append_file_bytes(tmp, chunk)?;
-                            acc = crypto.sha256(acc + chunk);
                             data_bytes = data_bytes + chunk.len();
                         },
                     }
