@@ -1,6 +1,6 @@
 # raysync
 
-Sincronizador de directorios **con delta por bloques y transporte cifrado**, escrito en [raylang](https://github.com/roberto-ayala/raylang): un `push` de una dirección que salta los archivos idénticos (hash), reenvía solo los **bloques de 64 KiB que cambiaron** de los archivos modificados, reconstruye del lado receptor con verificación de hash y rename atómico, y con `--watch` queda aparcado en eventos de kernel (`fs.watch`). Complementa a [takeit](../takeit) (un archivo, una vez) con el caso "un árbol entero, continuamente".
+Sincronizador de directorios **con delta por bloques y transporte cifrado**, escrito en [raylang](https://github.com/ray-language/raylang): un `push` de una dirección que salta los archivos idénticos (hash), reenvía solo los **bloques de 64 KiB que cambiaron** de los archivos modificados, reconstruye del lado receptor con verificación de hash y rename atómico, y con `--watch` queda aparcado en eventos de kernel (`fs.watch`). Complementa a [takeit](../takeit) (un archivo, una vez) con el caso "un árbol entero, continuamente".
 
 ```text
 # Receptor
