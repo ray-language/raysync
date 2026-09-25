@@ -106,18 +106,19 @@ fn main() -> int {
             eprint("raysync: --password is required");
             return 1;
         }
-        if (has_flag(
-    av,
-    "--watch"
-)) {
+        if (has_flag(av, "--watch")) {
             push.watch(opts, flag_int(av, "--watch", 2000))
         } else {
-            match (push.push_once(
-    opts
-)) {
+            match (push.push_once(opts)) {
                 Result.Ok(st) => {
                     print(
-                        "synced " + to_string(st.files_sent) + " file(s): " + to_string(st.data_bytes) + " B sent, " + to_string(st.copied_bytes) + " B reused in place"
+                        "synced "
+                            + to_string(st.files_sent)
+                            + " file(s): "
+                            + to_string(st.data_bytes)
+                            + " B sent, "
+                            + to_string(st.copied_bytes)
+                            + " B reused in place"
                     );
                     0
                 },

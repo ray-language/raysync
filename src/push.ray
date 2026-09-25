@@ -243,13 +243,17 @@ pub fn watch(opts: PushOpts, interval_ms: int) -> int {
     while (true) {
         let now = fingerprint(opts.src);
         if (now != last) {
-            match (push_once(
-            opts
-        )) {
+            match (push_once(opts)) {
                 Result.Ok(st) => {
                     last = now;
                     eprint(
-                        "synced: " + to_string(st.files_sent) + " file(s), " + to_string(st.data_bytes) + " B data, " + to_string(st.copied_bytes) + " B reused"
+                        "synced: "
+                            + to_string(st.files_sent)
+                            + " file(s), "
+                            + to_string(st.data_bytes)
+                            + " B data, "
+                            + to_string(st.copied_bytes)
+                            + " B reused"
                     );
                 },
                 Result.Err(e) => {
@@ -263,11 +267,15 @@ pub fn watch(opts: PushOpts, interval_ms: int) -> int {
 }
 
 fn sync_and_report(opts: PushOpts) {
-    match (push_once(
-    opts
-)) {
+    match (push_once(opts)) {
         Result.Ok(st) => eprint(
-            "synced: " + to_string(st.files_sent) + " file(s), " + to_string(st.data_bytes) + " B data, " + to_string(st.copied_bytes) + " B reused"
+            "synced: "
+                + to_string(st.files_sent)
+                + " file(s), "
+                + to_string(st.data_bytes)
+                + " B data, "
+                + to_string(st.copied_bytes)
+                + " B reused"
         ),
         Result.Err(e) => eprint("raysync: " + e + " (retrying)"),
     }

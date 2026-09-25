@@ -32,8 +32,14 @@ fn must_read(path: string) -> string {
 
 fn do_push(delete: bool) -> push.PushStats {
     match (push.push_once(
-    push.PushOpts { src: SRC, host: "127.0.0.1", port: PORT, password: "secreto", delete: delete }
-)) {
+        push.PushOpts {
+            src: SRC,
+            host: "127.0.0.1",
+            port: PORT,
+            password: "secreto",
+            delete: delete
+        }
+    )) {
         Result.Ok(st) => st,
         Result.Err(e) => panic(e),
     }
@@ -95,8 +101,14 @@ fn sync_end_to_end() {
 
     // Wrong password: authentication fails, nothing breaks.
     match (push.push_once(
-    push.PushOpts { src: SRC, host: "127.0.0.1", port: PORT, password: "equivocada", delete: false }
-)) {
+        push.PushOpts {
+            src: SRC,
+            host: "127.0.0.1",
+            port: PORT,
+            password: "equivocada",
+            delete: false
+        }
+    )) {
         Result.Err(e) => assert(e.contains("authentication") || e.contains("closed")),
         Result.Ok(st) => panic("wrong password must fail"),
     }

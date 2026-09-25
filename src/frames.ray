@@ -26,7 +26,15 @@ pub fn derive_key(password: string, salt: bytes) -> bytes {
 
 // dir: 1 = client→server, 2 = server→client.
 pub fn link(handle: int, key: bytes, is_client: bool) -> Link {
-    Link { handle: handle, key: key, send_dir: if (is_client) { 1 } else { 2 }, send_ctr: 0, recv_dir: if (is_client) { 2 } else { 1 }, recv_ctr: 0, buf: b"" }
+    Link { handle: handle, key: key, send_dir: if (is_client) {
+        1
+    } else {
+        2
+    }, send_ctr: 0, recv_dir: if (is_client) {
+        2
+    } else {
+        1
+    }, recv_ctr: 0, buf: b"" }
 }
 
 fn nonce_of(dir: int, ctr: int) -> bytes {
