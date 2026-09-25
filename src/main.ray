@@ -16,7 +16,7 @@ fn usage() {
         "  push:  sends SRC; unchanged files skip, changed files send only changed 64 KiB blocks"
     );
     eprint("  --delete: remove receiver files that no longer exist in SRC");
-    eprint("  --watch:  keep watching mtimes and re-push on change (default 2000 ms)");
+    eprint("  --watch:  re-push on filesystem events (MS = retry/poll fallback, default 2000)");
 }
 
 fn flag_value(av: [string], name: string) -> Option<string> {

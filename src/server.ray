@@ -24,11 +24,10 @@ pub fn start(opts: ServeOpts) -> Result<int, string> {
     let listener = net.tcp_listen(opts.bind, opts.port)?;
     let actual = net.local_port(listener);
     spawn(fn() {
-        var running = true;
-        while (running) {
+        while (true) {
             match (net.tcp_accept(listener)) {
                 Result.Err(e) => {
-                    running = false;
+                    break;
                 },
                 Result.Ok(h) => {
                     spawn(fn() {
@@ -41,19 +40,25 @@ pub fn start(opts: ServeOpts) -> Result<int, string> {
     Result.Ok(actual)
 }
 
-fn mkdir_p(root: string, rel_dir: string) {
-    if (rel_dir == "") {
-        return;
-    }
+// Creates root/rel_dir component by component. Every component that already
+// exists must resolve inside the root (checked BEFORE descending into it), so
+// a symlinked directory cannot make us create or write anything outside.
+fn mkdir_p(root: string, rel_dir: string) -> Result<int, string> {
     var acc = root;
     for part in rel_dir.split("/") {
-        if (part != "") {
-            acc = acc + "/" + part;
-            if (!fs.exists(acc)) {
-                fs.mkdir(acc);
+        if (part == "") {
+            continue;
+        }
+        acc = acc + "/" + part;
+        if (fs.exists(acc)) {
+            if (!contained(root, acc)) {
+                return Result.Err("path escapes the sync root: " + rel_dir);
             }
+        } else {
+            fs.mkdir(acc)?;
         }
     }
+    Result.Ok(0)
 }
 
 fn parent_of(rel: string) -> string {
@@ -66,6 +71,16 @@ fn parent_of(rel: string) -> string {
         i = i + 1;
     }
     if (last < 0) { "" } else { rel.substring(0, last) }
+}
+
+// Whether `path` really lives under `root` once symlinks are resolved
+// (fs.is_within_real, raylang 1.26): a symlink inside the sync root that
+// points elsewhere must never be read, written or deleted through.
+fn contained(root: string, path: string) -> bool {
+    match (fs.is_within_real(path, root)) {
+        Result.Ok(inside) => inside,
+        Result.Err(e) => false,
+    }
 }
 
 fn serve_conn(h: int, opts: ServeOpts) {
@@ -119,6 +134,9 @@ fn session(l: frames.Link, opts: ServeOpts) -> Result<int, string> {
     // Local view: path → hash for existing files.
     var have: Map<string, string> = Map.new();
     for f in scan.walk(opts.root) {
+        if (!contained(opts.root, opts.root + "/" + f.path)) {
+            continue;
+        }
         match (scan.file_hash(opts.root + "/" + f.path)) {
             Result.Ok(hh) => {
                 have.insert(f.path, hh);
@@ -163,12 +181,11 @@ fn session(l: frames.Link, opts: ServeOpts) -> Result<int, string> {
     var nfiles = 0;
     var data_bytes = 0;
     var copied_bytes = 0;
-    var running = true;
-    while (running) {
+    while (true) {
         let m = expect_msg(l)?;
         let tag = proto.tag_of(m);
         if (tag == "done") {
-            running = false;
+            break;
         } else if (tag == "file" || tag == "patch") {
             let p = match (json.get_string(m, "p")) {
                 Option.Some(s) => s,
@@ -179,8 +196,13 @@ fn session(l: frames.Link, opts: ServeOpts) -> Result<int, string> {
             if (p.contains("..")) {
                 return Result.Err("path traversal rejected: " + p);
             }
-            mkdir_p(opts.root, parent_of(p));
+            mkdir_p(opts.root, parent_of(p))?;
             let final_path = opts.root + "/" + p;
+            // A patch reuses blocks of the existing file: it must resolve inside
+            // the root too (a symlink there could point anywhere).
+            if (tag == "patch" && !contained(opts.root, final_path)) {
+                return Result.Err("path escapes the sync root: " + p);
+            }
             let tmp = final_path + ".raysync.tmp";
             fs.write_file_bytes(tmp, b"")?;
             if (tag == "file") {

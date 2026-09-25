@@ -61,7 +61,7 @@ pub fn tag_of(j: Json) -> string {
 pub fn hello() -> Json {
     var m: Map<string, Json> = Map.new();
     m.insert("t", Json.JStr("hello"));
-    m.insert("v", Json.JNum(1.0));
+    m.insert("v", Json.JNum(2.0));
     Json.JObject(m)
 }
 
@@ -115,7 +115,7 @@ pub fn parse_manifest(j: Json) -> ([ManifestEntry], bool) {
         },
         Option.None => { },
     }
-    return (out, del);
+    (out, del)
 }
 
 pub struct BlockPlanEntry {

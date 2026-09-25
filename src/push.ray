@@ -63,8 +63,7 @@ fn send_full(l: frames.Link, path: string) -> Result<(int, string), string> {
     // Hasher incremental (raylang M126): el sha256 real del archivo, boundary-independiente.
     let hh = crypto.sha256_init()?;
     var sent = 0;
-    var more = true;
-    while (more) {
+    while (true) {
         match (scan.read_exact_block(h)) {
             Result.Err(e) => {
                 close(h);
@@ -77,11 +76,11 @@ fn send_full(l: frames.Link, path: string) -> Result<(int, string), string> {
                         let _ = crypto.hash_update(hh, block);
                         sent = sent + block.len();
                         if (block.len() < scan.BLOCK) {
-                            more = false;
+                            break;
                         }
                     },
                     Option.None => {
-                        more = false;
+                        break;
                     },
                 }
             },
@@ -131,8 +130,7 @@ pub fn push_once(opts: PushOpts) -> Result<PushStats, string> {
         var ls: [int] = [];
         var blocks: [bytes] = [];
         let fh = fs.open(full_path, "r")?;
-        var more = true;
-        while (more) {
+        while (true) {
             match (scan.read_exact_block(fh)) {
                 Result.Err(e) => {
                     close(fh);
@@ -145,11 +143,11 @@ pub fn push_once(opts: PushOpts) -> Result<PushStats, string> {
                             lh.push(hex_encode(crypto.sha256(block)));
                             ls.push(block.len());
                             if (block.len() < scan.BLOCK) {
-                                more = false;
+                                break;
                             }
                         },
                         Option.None => {
-                            more = false;
+                            break;
                         },
                     }
                 },
@@ -201,8 +199,6 @@ fn fingerprint(root: string) -> string {
     acc
 }
 
-// Watch mode: poll mtimes every interval_ms and push when anything moved.
-// std/fs has no watch API (recorded finding — the 4th app to poll mtimes).
 // Modo continuo: eventos de KERNEL (fs.watch, raylang M115.4) con debounce — una rafaga de
 // guardados es UN push. Degrada al sondeo de mtimes viejo si el watch no se puede armar.
 pub fn watch(opts: PushOpts, interval_ms: int) -> int {
@@ -212,18 +208,16 @@ pub fn watch(opts: PushOpts, interval_ms: int) -> int {
             while (true) {
                 match (fs.next_event(w)) {
                     Result.Ok(_ev) => {
-                        // Debounce: agrupa la rafaga.
-                        var draining = true;
-                        while (draining) {
+                        // Debounce: agrupa la rafaga (hasta 200 ms de silencio).
+                        while (true) {
                             match (fs.next_event_timeout(w, 200)) {
-                                Result.Ok(more) => match (more) {
-                                    Option.Some(_e2) => { },
-                                    Option.None => {
-                                        draining = false;
-                                    },
+                                Result.Ok(more) => {
+                                    if (more.is_none()) {
+                                        break;
+                                    }
                                 },
                                 Result.Err(_e3) => {
-                                    draining = false;
+                                    break;
                                 },
                             }
                         }

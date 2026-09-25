@@ -1,9 +1,9 @@
 // raysync — recursive directory scan and hashing.
 //
-// Whole-file hashes are CHAINED sha256 over 64 KiB chunks (h = sha256(h ‖
-// chunk)), the takeit pattern: std/crypto has no incremental hasher (recorded
-// finding), and one-shot sha256 of a big file would need it whole in memory.
-// Block hashes are plain sha256 per block (blocks fit in memory by design).
+// Whole-file hashes are the real sha256 of the file, fed 64 KiB at a time to
+// the incremental hasher (raylang M126) so a big file never sits whole in
+// memory. Block hashes are plain sha256 per block (blocks fit in memory by
+// design).
 import std/fs;
 import std/crypto;
 import std/hex;
@@ -60,8 +60,7 @@ pub fn file_hash(path: string) -> Result<string, string> {
     // de los limites de bloque (el encadenado casero dependia de ellos) y contrastable con
     // `shasum -a 256`.
     let hh = crypto.sha256_init()?;
-    var more = true;
-    while (more) {
+    while (true) {
         match (fs.read_bytes(h, BLOCK)) {
             Result.Err(e) => {
                 close(h);
@@ -73,7 +72,7 @@ pub fn file_hash(path: string) -> Result<string, string> {
                         let _ = crypto.hash_update(hh, chunk);
                     },
                     Option.None => {
-                        more = false;
+                        break;
                     },
                 }
             },
@@ -87,8 +86,7 @@ pub fn file_hash(path: string) -> Result<string, string> {
 pub fn block_hashes(path: string) -> Result<[string], string> {
     let h = fs.open(path, "r")?;
     var out: [string] = [];
-    var more = true;
-    while (more) {
+    while (true) {
         match (read_exact_block(h)) {
             Result.Err(e) => {
                 close(h);
@@ -99,11 +97,11 @@ pub fn block_hashes(path: string) -> Result<[string], string> {
                     Option.Some(block) => {
                         out.push(to_hex_str(crypto.sha256(block)));
                         if (block.len() < BLOCK) {
-                            more = false;
+                            break;
                         }
                     },
                     Option.None => {
-                        more = false;
+                        break;
                     },
                 }
             },

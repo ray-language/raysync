@@ -1,9 +1,12 @@
 // raysync — the encrypted transport: length-prefixed ChaCha20-Poly1305 frames.
 //
-// Key = HKDF(salt, password, "raysync-v1"); the salt travels in clear at
-// accept time (takeit's scheme — the password never does). Nonces are a
-// direction byte + a counter, so each side has its own nonce space and a
-// replayed or reordered frame fails authentication.
+// Key = PBKDF2-HMAC-SHA256(password, salt, KDF_ITERATIONS); the salt travels
+// in clear at accept time (takeit's scheme — the password never does). The
+// derivation is deliberately slow: someone who records a session cannot try
+// passwords against it at HMAC speed (protocol v1 used HKDF, which is fast;
+// v1 and v2 peers do not interoperate — the handshake fails authentication).
+// Nonces are a direction byte + a counter, so each side has its own nonce
+// space and a replayed or reordered frame fails authentication.
 import std/net;
 import std/crypto;
 
@@ -17,8 +20,10 @@ pub struct Link {
     buf: bytes,
 }
 
+pub const KDF_ITERATIONS: int = 600000;
+
 pub fn derive_key(password: string, salt: bytes) -> bytes {
-    match (crypto.hkdf_sha256(salt, password.to_bytes(), "raysync-v1".to_bytes(), 32)) {
+    match (crypto.pbkdf2_hmac_sha256(password.to_bytes(), salt, KDF_ITERATIONS, 32)) {
         Option.Some(k) => k,
         Option.None => b"",
     }
@@ -26,25 +31,24 @@ pub fn derive_key(password: string, salt: bytes) -> bytes {
 
 // dir: 1 = client→server, 2 = server→client.
 pub fn link(handle: int, key: bytes, is_client: bool) -> Link {
-    Link { handle: handle, key: key, send_dir: if (is_client) {
-        1
-    } else {
-        2
-    }, send_ctr: 0, recv_dir: if (is_client) {
-        2
-    } else {
-        1
-    }, recv_ctr: 0, buf: b"" }
+    let (send_dir, recv_dir) = if (is_client) { (1, 2) } else { (2, 1) };
+    Link {
+        handle: handle,
+        key: key,
+        send_dir: send_dir,
+        send_ctr: 0,
+        recv_dir: recv_dir,
+        recv_ctr: 0,
+        buf: b""
+    }
 }
 
 fn nonce_of(dir: int, ctr: int) -> bytes {
     var n: [int] = [dir, 0, 0, 0];
     var v = ctr;
-    var i = 0;
-    while (i < 8) {
+    for i in 0..8 {
         n.push(v % 256);
         v = v / 256;
-        i = i + 1;
     }
     bytes_of(n)
 }
