@@ -77,8 +77,8 @@ Anotados en `raylang/IDEAS.md` §69:
 2. **[RESUELTO — raylang M115.3 / 1.26]** Sin metadatos: `fs.stat` (lstat:
    kind/mode/size/mtime) distingue symlinks y `fs.real_path`/`is_within_real`
    dan la contención que usa el receptor. Replicar permisos y symlinks queda
-   para v2 (es trabajo de la app, ya no del lenguaje); crear un symlink sigue
-   sin API en `std/fs` (el test usa `ln -s`).
+   para v2 (es trabajo de la app, ya no del lenguaje); crear un symlink ya
+   tiene `fs.symlink` (raylang 1.27.13; el test lo usa en vez de `ln -s`).
 3. **[RESUELTO — raylang M115]** Sin `fs.write_bytes(handle)`: existe; la
    reconstrucción sigue por temp + `append_file_bytes` + rename porque es lo
    que da la atomicidad.
@@ -92,7 +92,7 @@ Anotados en `raylang/IDEAS.md` §69:
 
 ## Desarrollo
 
-Requiere raylang 1.27+ (sin dependencias externas).
+Requiere raylang 1.27.13+ (sin dependencias externas).
 
 ```sh
 ray test                # 4 tests

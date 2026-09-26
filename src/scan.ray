@@ -71,9 +71,7 @@ pub fn file_hash(path: string) -> Result<string, string> {
                     Option.Some(chunk) => {
                         let _ = crypto.hash_update(hh, chunk);
                     },
-                    Option.None => {
-                        break;
-                    },
+                    Option.None => break,
                 }
             },
         }
@@ -100,9 +98,7 @@ pub fn block_hashes(path: string) -> Result<[string], string> {
                             break;
                         }
                     },
-                    Option.None => {
-                        break;
-                    },
+                    Option.None => break,
                 }
             },
         }

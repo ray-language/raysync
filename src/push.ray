@@ -79,9 +79,7 @@ fn send_full(l: frames.Link, path: string) -> Result<(int, string), string> {
                             break;
                         }
                     },
-                    Option.None => {
-                        break;
-                    },
+                    Option.None => break,
                 }
             },
         }
@@ -146,9 +144,7 @@ pub fn push_once(opts: PushOpts) -> Result<PushStats, string> {
                                 break;
                             }
                         },
-                        Option.None => {
-                            break;
-                        },
+                        Option.None => break,
                     }
                 },
             }
@@ -216,9 +212,7 @@ pub fn watch(opts: PushOpts, interval_ms: int) -> int {
                                         break;
                                     }
                                 },
-                                Result.Err(_e3) => {
-                                    break;
-                                },
+                                Result.Err(_e3) => break,
                             }
                         }
                         sync_and_report(opts);
