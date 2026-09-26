@@ -1,5 +1,6 @@
 [package]
 name = "raysync"
 version = "0.1.0"
+raylang = "1.27.13"
 
 [dependencies]

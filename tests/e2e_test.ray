@@ -2,7 +2,6 @@
 // travel as data), nested dirs, delete, wrong password. One @test (zombie
 // listeners between tests).
 import std/fs;
-import std/process;
 import scan;
 import server;
 import push;
@@ -15,9 +14,8 @@ fn temp_dir(prefix: string) -> string {
 }
 
 fn symlink(target: string, link: string) {
-    // std/fs cannot create symlinks; ln is enough for a test fixture.
-    match (process.run("ln", ["-s", target, link])) {
-        Result.Ok(out) => { },
+    match (fs.symlink(target, link)) {
+        Result.Ok(_) => { },
         Result.Err(e) => panic(e),
     }
 }

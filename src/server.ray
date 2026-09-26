@@ -26,9 +26,7 @@ pub fn start(opts: ServeOpts) -> Result<int, string> {
     spawn(fn() {
         while (true) {
             match (net.tcp_accept(listener)) {
-                Result.Err(e) => {
-                    break;
-                },
+                Result.Err(e) => break,
                 Result.Ok(h) => {
                     spawn(fn() {
                         serve_conn(h, opts);
