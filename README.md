@@ -48,6 +48,9 @@ $ raysync push ./proyecto … --delete         # borra en destino lo que ya no e
    y **contención real** (`fs.is_within_real`, raylang 1.26): un symlink dentro
    del destino que apunte fuera nunca se usa para escribir, leer bloques ni
    borrar (`--delete`) — la sesión falla con "path escapes the sync root".
+   En el origen, los symlinks **no se siguen**: el escaneo los salta (como
+   rsync sin `-l`), así que un enlace dentro de SRC no envía el archivo o el
+   árbol al que apunta.
 
 Delta de bloques FIJOS: perfecto para appends y ediciones in-place; una
 inserción desplaza todo lo posterior (el rolling checksum de rsync queda
@@ -63,8 +66,8 @@ fuera de v1).
 | `--delete` (espejo) y `--watch` (fs.watch + debounce; degrada a sondeo) | ✅ |
 | Contraseña errónea = fallo de autenticación limpio | ✅ |
 | Binario nativo (50 MB en 0.17 s) | ✅ |
-| Tests (scan/hash/bloques + E2E con delta, borrado y symlink que escapa) | ✅ 4 |
-| Contención del destino ante symlinks (`fs.is_within_real`) | ✅ |
+| Tests (scan/hash/bloques + E2E con delta, borrado y symlink que escapa; symlinks del origen) | ✅ 5 |
+| Contención del destino ante symlinks (`fs.is_within_real`); symlinks del origen ignorados | ✅ |
 | Rolling checksum (inserciones), sync bidireccional | 📋 fuera de v1 |
 | Replicar permisos/symlinks/metadatos | 📋 v2 (`fs.stat`/`fs.chmod` ya existen) |
 

@@ -75,3 +75,25 @@ fn block_hashes_and_read_block_at_agree() {
     }
     fs.remove_all(root);
 }
+
+@test
+fn symlinks_are_not_followed() {
+    let root = fresh_root();
+    let outside = match (fs.make_temp_dir("raysync_outside_")) {
+        Result.Ok(d) => d,
+        Result.Err(e) => panic(e),
+    };
+    fs.write_file(outside + "/secret.txt", "outside");
+    fs.write_file(root + "/a.txt", "aaa");
+    fs.symlink(outside + "/secret.txt", root + "/file-link.txt");
+    fs.symlink(outside, root + "/sub/dir-link");
+    fs.symlink(root, root + "/sub/loop");
+    let files = scan.walk(root);
+    var paths: [string] = [];
+    for f in files {
+        paths.push(f.path);
+    }
+    fs.remove_all(root);
+    fs.remove_all(outside);
+    assert_eq(paths, ["a.txt"]);
+}

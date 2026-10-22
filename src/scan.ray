@@ -24,6 +24,17 @@ fn walk_into(root: string, rel: string, out: [FileInfo]) {
             for name in names {
                 let rpath = if (rel == "") { name } else { rel + "/" + name };
                 let full = root + "/" + rpath;
+                // fs.is_dir/is_file follow symlinks: a link in SRC would send
+                // the file (or the tree) it points to, wherever that is. Only
+                // fs.stat sees the link itself; links are skipped, like rsync
+                // without -l (this also keeps a looping link from recursing).
+                let link = match (fs.stat(full)) {
+                    Result.Ok(st) => st.kind == "symlink",
+                    Result.Err(e) => true,
+                };
+                if (link) {
+                    continue;
+                }
                 if (fs.is_dir(full)) {
                     walk_into(root, rpath, out);
                 } else if (fs.is_file(full)) {
@@ -42,7 +53,8 @@ fn walk_into(root: string, rel: string, out: [FileInfo]) {
     }
 }
 
-// All regular files under root, as sorted relative paths.
+// All regular files under root, as sorted relative paths; symlinks (to files
+// or directories) are not followed and not listed.
 pub fn walk(root: string) -> [FileInfo] {
     var out: [FileInfo] = [];
     walk_into(root, "", out);
