@@ -1,0 +1,81 @@
+// A client (here, one that speaks the protocol by hand) cannot make the server write outside its
+// root: not with "..", and not through a symlink that already sits inside the root.
+import std/fs;
+import std/net;
+import frames;
+import proto;
+import scan;
+import server;
+
+fn temp_dir(prefix: string) -> string {
+    match (fs.make_temp_dir(prefix)) {
+        Result.Ok(d) => d,
+        Result.Err(e) => panic(e),
+    }
+}
+
+/// Opens a session, announces an empty manifest and sends one file at `path`; Ok(()) if the
+/// server accepted it, Err with the server's message otherwise.
+fn send_one(port: int, path: string, content: bytes, hash: string) -> Result<int, string> {
+    let h = net.tcp_connect("127.0.0.1", port)?;
+    net.set_read_timeout(h, 5000);
+    var salt = b"";
+    while (salt.len() < 16) {
+        let chunk = net.socket_read_bytes(h)?;
+        if (chunk.len() == 0) {
+            return Result.Err("closed before the salt");
+        }
+        salt = salt + chunk;
+    }
+    let l = frames.link(h, frames.derive_key("secreto", salt), true);
+    frames.send_frame(l, proto.msg_frame(proto.hello()))?;
+    frames.send_frame(l, proto.msg_frame(proto.manifest([], false)))?;
+    frames.recv_frame(l)?;
+    frames.send_frame(l, proto.msg_frame(proto.file_msg(path, content.len())))?;
+    frames.send_frame(l, proto.data_frame(content))?;
+    frames.send_frame(l, proto.msg_frame(proto.end_msg(hash)))?;
+    frames.send_frame(l, proto.msg_frame(proto.simple_msg("done")))?;
+    let reply = match (proto.classify(frames.recv_frame(l)?)) {
+        proto.Frame.Msg(j) => j,
+        _ => {
+            close(h);
+            return Result.Err("unexpected reply");
+        },
+    };
+    close(h);
+    if (proto.tag_of(reply) == "err") {
+        return Result.Err("refused");
+    }
+    Result.Ok(0)
+}
+
+@test
+fn a_client_cannot_write_outside_the_root() {
+    let base = temp_dir("raysync_paths_");
+    let root = base + "/root";
+    let outside = base + "/outside";
+    fs.mkdir(root).expect("root");
+    fs.mkdir(outside).expect("outside");
+    fs.symlink(outside, root + "/link").expect("symlink");
+    let content = b"payload";
+    fs.write_file_bytes(base + "/sample", content).expect("sample");
+    let hash = scan.file_hash(base + "/sample").expect("hash");
+    let port = server.start(server.ServeOpts { root: root, bind: "127.0.0.1", port: 0, password: "secreto" })
+        .expect("server");
+    let attempts = ["../outside/a.txt", "link/b.txt", "link/sub/c.txt"];
+    var accepted: [string] = [];
+    for p in attempts {
+        if (send_one(port, p, content, hash).is_ok()) {
+            accepted.push(p);
+        }
+    }
+    let leaked = fs.list_dir(outside).unwrap_or([]);
+    // A plain path still works.
+    let plain = send_one(port, "ok/d.txt", content, hash);
+    let landed = fs.exists(root + "/ok/d.txt");
+    fs.remove_all(base);
+    assert_eq_msg(accepted.len(), 0, "accepted: " + builtin.join(accepted, ", "));
+    assert_eq_msg(leaked.len(), 0, "written outside the root: " + builtin.join(leaked, ", "));
+    assert(plain.is_ok());
+    assert(landed);
+}
